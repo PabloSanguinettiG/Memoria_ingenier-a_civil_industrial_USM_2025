@@ -2,7 +2,6 @@
 **Medición de ineficiencias y diseño de incentivos en Salud y Educación (Chile)**  
 **Memoria Ingeniería Civil Industrial — UTFSM (2025)**
 
-> Repositorio público con los scripts y materiales que reproducen las figuras/tablas y análisis de la memoria.  
 > **Nota:** los archivos con extensión `.txt` son **código R** (se mantuvieron como `.txt` por compatibilidad). Puedes abrirlos como **.R** sin problemas.
 
 ---
@@ -22,8 +21,6 @@ La lógica del repositorio es **transparencia y trazabilidad**: cada script docu
 - `MODELO_B2.txt` → R: DEA BCC–VRS con **salida ajustada por calidad** (por ejemplo, egresos vivos).
 - `MODELO_EDUCACION.txt` → R: paneles y lecturas por pares para resultados en **Educación** (SIMCE; matrícula/beneficios ES).
 - `README.md` → este documento.
-
-> Si prefieres, puedes renombrar cualquier `.txt` a `.R` para ejecutarlo directamente en RStudio.
 
 ---
 
