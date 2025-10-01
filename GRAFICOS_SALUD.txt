@@ -1,0 +1,183 @@
+###################################################
+# 1. Gasto en Fonasa
+###################################################
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+df <- tribble(
+  ~anio, ~fonasa,     ~pct_salud_en_fonasa, ~pct_fonasa_grp,
+  2024, 13944686,     0.8376,               0.3800,
+  2023, 13429478,     0.8793,               0.3558,
+  2022, 11716502,     0.8173,               0.3326,
+  2021, 11010370,     0.7855,               0.3663,
+  2020, 10148349,     0.8444,               0.3519,
+  2019,  8723669,     0.8540,               NA_real_
+)
+
+# Escala para mapear % al eje izq y mostrar en eje der con sec_axis
+k <- max(df$fonasa, na.rm = TRUE) / 100  # 100% ≈ max(Fonasa)
+
+df_long <- df %>%
+  mutate(
+    pct_salud_scaled = pct_salud_en_fonasa * 100 * k,
+    pct_grp_scaled   = pct_fonasa_grp     * 100 * k
+  )
+
+# Data para líneas (solo %)
+lines_long <- df_long %>%
+  select(anio, pct_salud_scaled, pct_grp_scaled) %>%
+  pivot_longer(-anio, names_to = "serie", values_to = "valor")
+
+# Etiquetas % sobre los puntos
+labels_df <- df %>%
+  transmute(
+    anio, serie = "pct_salud_scaled",
+    valor = pct_salud_en_fonasa * 100 * k,
+    lab = ifelse(!is.na(pct_salud_en_fonasa), sprintf("%.1f%%", pct_salud_en_fonasa*100), NA)
+  ) %>%
+  bind_rows(
+    df %>%
+      transmute(
+        anio, serie = "pct_grp_scaled",
+        valor = pct_fonasa_grp * 100 * k,
+        lab = ifelse(!is.na(pct_fonasa_grp), sprintf("%.1f%%", pct_fonasa_grp*100), NA)
+      )
+  ) %>% filter(!is.na(lab))
+
+# Colores
+bar_fill <- "#CFE8F3"     # barra clara
+col_salud <- "#8E44AD"
+col_grp   <- "#27AE60"
+
+ggplot() +
+  # Barras (Fonasa, eje izq)
+  geom_col(data = df_long, aes(x = anio, y = fonasa),
+           fill = bar_fill, width = 0.6, color = NA) +
+  # Líneas y puntos (porcentajes, mapeados a escala del eje izq)
+  geom_line(data = lines_long, aes(x = anio, y = valor, color = serie), linewidth = 0.9, na.rm = TRUE) +
+  geom_point(data = lines_long, aes(x = anio, y = valor, color = serie), size = 2.2, na.rm = TRUE) +
+  geom_text(data = labels_df, aes(x = anio, y = valor, label = lab, color = serie),
+            vjust = -0.7, size = 3.0, show.legend = FALSE) +
+  scale_color_manual(
+    values = c(pct_salud_scaled = col_salud, pct_grp_scaled = col_grp),
+    labels = c(pct_salud_scaled = "% Salud en Fonasa (der.)",
+               pct_grp_scaled   = "% Fonasa de GRP (der.)"),
+    guide = guide_legend(title = NULL)
+  ) +
+  scale_x_continuous(breaks = df$anio) +
+  scale_y_continuous(
+    labels = label_comma(),
+    name   = "Fonasa (M$ corrientes)",
+    sec.axis = sec_axis(~ . / k,
+                        name = "% (eje derecho)",
+                        labels = label_percent(accuracy = 0.1, scale = 1))
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title.x = element_blank(),
+    legend.position = "top",
+    legend.justification = "left",
+    axis.ticks = element_line(size = 0.2),
+    axis.ticks.length = unit(2, "pt")
+  )
+
+###################################################
+###################################################
+###################################################
+###################################################
+###################################################
+
+
+
+###################################################
+# Minimal: lee datos, hace 2 scatters y matriz de covarianzas
+###################################################
+
+# Paquetes
+ipks <- c("googlesheets4","dplyr","readr","ggplot2","scales")
+new  <- ipks[!(ipks %in% installed.packages()[, "Package"])]
+if (length(new)) install.packages(new, dependencies = TRUE)
+
+library(googlesheets4)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(scales)
+
+# --- 1) Leer datos (hoja "8.2.", rango AN7:AT51) ---
+# Si te da error de permisos, cambia gs4_deauth() por gs4_auth()
+gs4_deauth()
+ss_url <- "https://docs.google.com/spreadsheets/d/1VcQB-CXlvWvquiJL_brEnVBdf0gqLFzVVA88ktHu3HM"
+
+raw <- read_sheet(
+  ss    = ss_url,
+  sheet = "8.2.",
+  range = "AN7:AT51",
+  col_types = "ccccccc"   # 7 columnas como texto
+)
+
+# --- 2) Limpiar y tipar ---
+dat <- raw %>%
+  rename(
+    costo = costo_egreso_hosp,
+    alos  = ALOS,
+    ocup  = ocupacion
+  ) %>%
+  mutate(
+    costo = parse_number(costo),
+    alos  = parse_number(alos),
+    ocup  = parse_number(ocup),
+    ocup  = ifelse(!is.na(ocup) & ocup > 1, ocup/100, ocup)
+  ) %>%
+  filter(!is.na(costo), !is.na(alos), !is.na(ocup))
+
+# --- 3) Scatter 1: X = ALOS, Y = costo_egreso_hosp ---
+p1 <- ggplot(dat, aes(x = alos, y = costo)) +
+  geom_point(size = 1.8, alpha = 0.9) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.45) +
+  labs(x = "ALOS (días de estada promedio 2024)",
+       y = "Costo por egreso (CLP, GRD 2024)") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_blank())
+print(p1)
+
+# --- 4) Scatter 2: X = ocupación, Y = costo_egreso_hosp ---
+p2 <- ggplot(dat, aes(x = ocup, y = costo)) +
+  geom_point(size = 1.8, alpha = 0.9) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.45) +
+  labs(x = "Ocupación (proporción 2024)",
+       y = "Costo por egreso (CLP, GRD 2024)") +
+  scale_x_continuous(labels = label_percent(accuracy = 1)) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_blank())
+print(p2)
+
+# --- 5) Matriz de covarianzas de {costo, ALOS, ocupación} ---
+vars <- dat %>% dplyr::select(costo, alos, ocup)
+cov_mat <- cov(vars, use = "pairwise.complete.obs")
+print(round(cov_mat, 3))
+
+
+
+###################################################
+###################################################
+###################################################
+###################################################
+###################################################
+
+
+
+
+
+
+
+
+
+

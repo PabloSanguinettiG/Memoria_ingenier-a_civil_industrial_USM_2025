@@ -1,0 +1,160 @@
+# -------- Paquetes --------
+ipks <- c("googlesheets4", "dplyr", "tidyr", "readr", "Benchmarking", "ggplot2", "purrr", "stringr")
+new <- ipks[!(ipks %in% installed.packages()[, "Package"])]
+if (length(new)) install.packages(new, dependencies = TRUE)
+
+library(googlesheets4)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(Benchmarking)
+library(ggplot2)
+library(purrr)
+library(stringr)
+
+# -------- 0) Leer Google Sheet --------
+gs4_deauth()  # hoja pública
+ss <- "https://docs.google.com/spreadsheets/d/1VcQB-CXlvWvquiJL_brEnVBdf0gqLFzVVA88ktHu3HM"
+raw <- read_sheet(ss, sheet = "7A", range = "A9:Y2655")
+
+# -------- 1) Nivel 3: establecimiento–servicio --------
+base <- raw %>% 
+  filter(`B_PAIS` == 0, `B_REGION` == 0)
+
+# INPUT 1: PROM_CAMAS (Glosa = "Promedio Cama Disponibles")
+inp_camas <- base %>%
+  filter(Glosa == "Promedio Cama Disponibles") %>%
+  transmute(
+    seremi_code  = as.character(`Cód. SS/SEREMI`),
+    estab_code   = as.character(`Cód. Estab.`),
+    estab_name   = as.character(`Nombre Establecimiento`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    service_name = as.character(`Nombre Nivel Cuidado`),
+    PROM_CAMAS   = suppressWarnings(as.numeric(PROM_CAMAS))
+  )
+
+# INPUT 2: Dias de Estada (Acum; Glosa = "Dias de Estada")
+inp_dias <- base %>%
+  filter(Glosa == "Dias de Estada") %>%
+  transmute(
+    estab_code   = as.character(`Cód. Estab.`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    DIAS_ESTADA  = suppressWarnings(as.numeric(Acum))
+  )
+
+# OUTPUT: Numero de Egresos (Acum; Glosa = "Numero de Egresos")
+out_egres <- base %>%
+  filter(Glosa == "Numero de Egresos") %>%
+  transmute(
+    estab_code   = as.character(`Cód. Estab.`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    EGRESOS      = suppressWarnings(as.numeric(Acum))
+  )
+
+# -------- 2) Panel con 2 inputs + 1 output --------
+A1 <- inp_camas %>%
+  inner_join(inp_dias , by = c("estab_code", "service_code")) %>%
+  inner_join(out_egres, by = c("estab_code", "service_code")) %>%
+  # (Opcional, pero recomendable) excluir agregados "Datos ..."
+  filter(service_code != "0",
+         !str_detect(service_name, regex("^Datos\\s", ignore_case = TRUE))) %>%
+  transmute(
+    seremi_code, 
+    estab_code, 
+    estab_name,
+    service_code, 
+    service_name,
+    x_camas = PROM_CAMAS,
+    x_dias  = DIAS_ESTADA,
+    y_egres = EGRESOS
+  ) %>%
+  filter(is.finite(x_camas), is.finite(x_dias), is.finite(y_egres),
+         x_camas > 0, x_dias > 0, y_egres > 0)
+
+# -------- 3) Agrupar por service_code y ejecutar DEA --------
+groups <- A1 %>%
+  group_by(service_code, service_name) %>%
+  nest() %>%
+  ungroup()
+
+# Función para ejecutar DEA (BCC VRS, output-oriented)
+run_dea <- function(df) {
+  if (nrow(df) < 2) {
+    warning("Grupo con menos de 2 observaciones; saltando DEA.")
+    return(NULL)
+  }
+  
+  X <- as.matrix(df[, c("x_camas", "x_dias")])
+  Y <- as.matrix(df[, "y_egres"])
+  
+  # Ejecutar DEA
+  dea_result <- dea(X, Y, RTS = "vrs", ORIENTATION = "out")
+  
+  # Para orientación out, algunas versiones devuelven phi>=1 y otras efic<=1.
+  eff_raw <- as.numeric(dea_result$eff)
+  efficiency <- ifelse(eff_raw <= 1 + 1e-9, pmin(100, eff_raw * 100), pmin(100, 100 / eff_raw))
+  
+  df$efficiency <- efficiency
+  return(df)
+}
+
+# Aplicar DEA a cada grupo
+groups <- groups %>%
+  mutate(data_with_eff = map(data, run_dea)) %>%
+  filter(!map_lgl(data_with_eff, is.null))
+
+# -------- 4) Generar histogramas por servicio --------
+plot_hist <- function(df, serv_name) {
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  
+  ggplot(df, aes(x = efficiency)) +
+    geom_histogram(binwidth = 5, fill = "#1f77b4", color = "black", boundary = 0) +
+    labs(title = paste("Histograma de Eficiencia para", serv_name),
+         x = "% Eficiencia",
+         y = "# Centros") +
+    scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 10)) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.title = element_text(face = "bold")
+    )
+}
+
+# Crear plots
+groups <- groups %>%
+  mutate(hist_plot = map2(data_with_eff, service_name, plot_hist))
+
+# Mostrar los plots
+walk(groups$hist_plot, print)
+
+# -------- 5) Tabla resumen solicitada --------
+tabla_resumen <- groups %>%
+  transmute(
+    codigo_servicio = service_code,
+    service_name    = service_name,
+    resumen = map(data_with_eff, ~{
+      d <- .
+      tibble(
+        numero_de_instituciones = n_distinct(d$estab_code),
+        numero_de_regiones      = n_distinct(d$seremi_code),
+        eficiencia_bajo_50      = sum(d$efficiency < 50,  na.rm = TRUE),
+        eficiencia_bajo_80      = sum(d$efficiency < 80,  na.rm = TRUE),
+        eficiencia_bajo_100     = sum(d$efficiency < 100, na.rm = TRUE),
+        eficiencia_100          = sum(d$efficiency >= 100 - 1e-6, na.rm = TRUE)
+      )
+    })
+  ) %>%
+  unnest(resumen) %>%
+  arrange(codigo_servicio) %>%
+  select(codigo_servicio,
+         numero_de_instituciones,
+         numero_de_regiones,
+         eficiencia_bajo_50,
+         eficiencia_bajo_80,
+         eficiencia_bajo_100,
+         eficiencia_100)
+
+print(tabla_resumen, n = nrow(tabla_resumen))
+
+# (Opcional) Guardar CSV
+write_csv(tabla_resumen, "DEA_A1_tabla_resumen_servicios.csv")

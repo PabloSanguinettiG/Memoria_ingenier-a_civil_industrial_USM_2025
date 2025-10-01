@@ -1,0 +1,623 @@
+# Datasources:
+
+
+
+###################################################
+# Gasto en Educación (barras, eje izq) + % (líneas, eje der.)
+# Datos corregidos 2019–2024 (orden ascendente)
+###################################################
+
+# pkgs <- c("ggplot2","dplyr","tidyr","readr","scales","stringr")
+# new  <- pkgs[!(pkgs %in% installed.packages()[, "Package"])]
+# if (length(new)) install.packages(new, dependencies = TRUE)
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(scales)
+library(stringr)
+
+# -----------------------------
+# 1) Datos (corregidos)
+# -----------------------------
+raw <- tibble::tribble(
+  ~anio, ~gasto,            ~pct_pib, ~pct_ps,  ~pct_sup,
+  2019,  "11.239.716.279",  "5.90%",  "50.27%", "6.91%",
+  2020,  "11.441.315.706",  "5.81%",  "51.56%", "13.49%",
+  2021,  "11.981.224.025",  "4.98%",  "54.10%", "13.31%",
+  2022,  "12.768.580.668",  "4.76%",  "54.83%", "14.13%",
+  2023,  "15.315.739.248",  "4.99%",  "55.18%", "14.67%",
+  2024,  "17.014.641.442",  "5.03%",  "53.49%", "15.18%"
+)
+
+# -----------------------------
+# 2) Limpieza / tipado
+# -----------------------------
+df <- raw %>%
+  mutate(
+    # CLP con miles "." y (si apareciera) decimal ","
+    gasto   = parse_number(gasto,  locale = locale(grouping_mark = ".", decimal_mark = ",")),
+    
+    # % con decimal ".", sin separador de miles
+    pct_pib = parse_number(pct_pib, locale = locale(decimal_mark = ".")) / 100,
+    pct_ps  = parse_number(pct_ps,  locale = locale(decimal_mark = ".")) / 100,
+    pct_sup = parse_number(pct_sup, locale = locale(decimal_mark = ".")) / 100
+  )
+
+# Constante de escala para mapear 0–100% al eje izquierdo de gasto
+k <- max(df$gasto, na.rm = TRUE) / 100  # 100% ≈ max(gasto)
+
+# Reescalado de % para graficarlos en el eje izquierdo
+df_scaled <- df %>%
+  transmute(
+    anio,
+    gasto,
+    `% PIB en Educación`      = pct_pib * 100 * k,
+    `% Educación en P+S`      = pct_ps  * 100 * k,
+    `% Educación en Superior` = pct_sup * 100 * k
+  )
+
+# Formato largo para líneas
+lines_long <- df_scaled %>%
+  pivot_longer(-c(anio, gasto), names_to = "serie", values_to = "valor")
+
+# Etiquetas % sobre los puntos (desde los % originales)
+labels_df <- df %>%
+  transmute(
+    anio,
+    `% PIB en Educación`      = pct_pib,
+    `% Educación en P+S`      = pct_ps,
+    `% Educación en Superior` = pct_sup
+  ) %>%
+  pivot_longer(-anio, names_to = "serie", values_to = "pct") %>%
+  mutate(
+    valor = pct * 100 * k,
+    lab   = sprintf("%.1f%%", pct * 100)
+  )
+
+# Paleta
+bar_fill <- "#CFE8F3"
+colores  <- c(
+  "% PIB en Educación"      = "#8E44AD",
+  "% Educación en P+S"      = "#2C7FB8",
+  "% Educación en Superior" = "#27AE60"
+)
+
+# -----------------------------
+# 3) Gráfico
+# -----------------------------
+p <- ggplot() +
+  # Barras (gasto, eje izq)
+  geom_col(
+    data = df_scaled,
+    aes(x = anio, y = gasto),
+    fill = bar_fill, width = 0.6, color = NA
+  ) +
+  # Líneas + puntos (porcentajes reescalados)
+  geom_line(
+    data = lines_long,
+    aes(x = anio, y = valor, color = serie),
+    linewidth = 0.9, na.rm = TRUE
+  ) +
+  geom_point(
+    data = lines_long,
+    aes(x = anio, y = valor, color = serie),
+    size = 2.2, na.rm = TRUE
+  ) +
+  # Etiquetas de % sobre los puntos
+  geom_text(
+    data = labels_df,
+    aes(x = anio, y = valor, label = lab, color = serie),
+    vjust = -0.7, size = 3.0, show.legend = FALSE
+  ) +
+  scale_color_manual(values = colores, guide = guide_legend(title = NULL)) +
+  scale_x_continuous(breaks = df$anio) +
+  scale_y_continuous(
+    labels = label_number(scale_cut = cut_short_scale()),  # eje izq: CLP abreviado
+    name   = "Gasto en Educación (CLP corrientes)",
+    sec.axis = sec_axis(
+      ~ . / k,
+      name   = "% (eje derecho)",
+      labels = label_percent(accuracy = 0.1, scale = 1)
+    )
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title           = element_blank(),
+    panel.grid.minor     = element_blank(),
+    panel.grid.major.x   = element_blank(),
+    axis.title.x         = element_blank(),
+    legend.position      = "top",
+    legend.justification = "left",
+    axis.ticks           = element_line(size = 0.2),
+    axis.ticks.length    = unit(2, "pt")
+  )
+
+print(p)
+
+# (Opcional) guardar a archivo:
+# ggsave("gasto_educacion_barras_lineas_2019_2024.png", p, width = 9, height = 5, dpi = 300)
+
+
+
+
+
+
+
+
+
+
+########################################################
+########################################################
+
+## 2. DEA de educacion para el simce
+
+########################################################
+########################################################
+
+# Paquetes
+ipks <- c("googlesheets4","dplyr","readr","janitor","stringr",
+          "tidyr","ggplot2","Benchmarking","scales")
+new  <- ipks[!(ipks %in% installed.packages()[, "Package"])]
+if (length(new)) install.packages(new, dependencies = TRUE)
+
+library(googlesheets4); library(dplyr); library(readr); library(janitor)
+library(stringr); library(tidyr); library(ggplot2); library(Benchmarking); library(scales)
+
+# Helpers
+to_int <- function(x)  suppressWarnings(as.integer(readr::parse_number(as.character(x))))
+to_num <- function(x)  suppressWarnings(readr::parse_number(as.character(x)))
+must_have <- function(df, cols){ miss <- cols[!cols %in% names(df)]; if (length(miss)) stop("Faltan columnas: ", paste(miss, collapse=", ")) }
+base_sz <- 13
+
+# Conexión
+gs4_deauth()
+SS <- "https://docs.google.com/spreadsheets/d/1VcQB-CXlvWvquiJL_brEnVBdf0gqLFzVVA88ktHu3HM"
+
+# SIMCE 4º básico
+sim4_raw <- read_sheet(SS, sheet = "11",  range = "A9:AP7194") |> clean_names()
+must_have(sim4_raw, c("rbd","nom_rbd","nom_reg_rbd","nom_com_rbd","cod_depe2","cod_grupo",
+                      "cod_rural_rbd","agno","grado","nalu_lect4b_rbd","nalu_mate4b_rbd",
+                      "prom_lect4b_rbd","prom_mate4b_rbd"))
+has_noap4 <- "noaplica" %in% names(sim4_raw)
+
+sim4 <- sim4_raw |>
+  mutate(
+    agno          = to_int(agno),
+    grado         = to_int(grado),
+    cod_depe2     = to_int(cod_depe2),
+    cod_grupo     = to_int(cod_grupo),
+    cod_rural_rbd = to_int(cod_rural_rbd),
+    nalu_lect4b_rbd = to_int(nalu_lect4b_rbd),
+    nalu_mate4b_rbd = to_int(nalu_mate4b_rbd),
+    prom_lect4b_rbd = to_num(prom_lect4b_rbd),
+    prom_mate4b_rbd = to_num(prom_mate4b_rbd),
+    noaplica        = if (has_noap4) to_int(noaplica) else NA_integer_
+  ) |>
+  filter(
+    agno == 2024, grado == 4,
+    is.na(noaplica) | noaplica == 0,
+    nalu_lect4b_rbd >= 15, nalu_mate4b_rbd >= 15
+  ) |>
+  transmute(
+    rbd = as.character(rbd), nom_rbd,
+    region = nom_reg_rbd, comuna = nom_com_rbd,
+    dep_cod = cod_depe2, gse_cod = cod_grupo, rural_cod = cod_rural_rbd,
+    n_4b_lec = nalu_lect4b_rbd, n_4b_mat = nalu_mate4b_rbd,
+    y_4b_lec = prom_lect4b_rbd, y_4b_mat = prom_mate4b_rbd
+  )
+
+# SIMCE 6º básico
+sim6_raw <- read_sheet(SS, sheet = "11B", range = "A9:AP7194") |> clean_names()
+must_have(sim6_raw, c("rbd","agno","grado","nalu_lect6b_rbd","nalu_mate6b_rbd",
+                      "prom_lect6b_rbd","prom_mate6b_rbd"))
+has_noap6 <- "noaplica" %in% names(sim6_raw)
+
+sim6 <- sim6_raw |>
+  mutate(
+    agno  = to_int(agno),
+    grado = to_int(grado),
+    nalu_lect6b_rbd = to_int(nalu_lect6b_rbd),
+    nalu_mate6b_rbd = to_int(nalu_mate6b_rbd),
+    prom_lect6b_rbd = to_num(prom_lect6b_rbd),
+    prom_mate6b_rbd = to_num(prom_mate6b_rbd),
+    noaplica        = if (has_noap6) to_int(noaplica) else NA_integer_
+  ) |>
+  filter(
+    agno == 2024, grado == 6,
+    is.na(noaplica) | noaplica == 0,
+    nalu_lect6b_rbd >= 15, nalu_mate6b_rbd >= 15
+  ) |>
+  transmute(
+    rbd = as.character(rbd),
+    n_6b_lec = nalu_lect6b_rbd, n_6b_mat = nalu_mate6b_rbd,
+    y_6b_lec = prom_lect6b_rbd, y_6b_mat = prom_mate6b_rbd
+  )
+
+# SIMCE II medio
+simii_raw <- read_sheet(SS, sheet = "11C", range = "A9:AP7194") |> clean_names()
+must_have(simii_raw, c("rbd","agno","grado","nalu_lect2m_rbd","nalu_mate2m_rbd",
+                       "prom_lect2m_rbd","prom_mate2m_rbd"))
+has_noapii <- "noaplica" %in% names(simii_raw)
+
+simii <- simii_raw |>
+  mutate(
+    agno  = to_int(agno),
+    grado = to_int(grado),
+    nalu_lect2m_rbd = to_int(nalu_lect2m_rbd),
+    nalu_mate2m_rbd = to_int(nalu_mate2m_rbd),
+    prom_lect2m_rbd = to_num(prom_lect2m_rbd),
+    prom_mate2m_rbd = to_num(prom_mate2m_rbd),
+    noaplica        = if (has_noapii) to_int(noaplica) else NA_integer_
+  ) |>
+  filter(
+    agno == 2024, grado %in% c(10, 2),
+    is.na(noaplica) | noaplica == 0,
+    nalu_lect2m_rbd >= 15, nalu_mate2m_rbd >= 15
+  ) |>
+  transmute(
+    rbd = as.character(rbd),
+    n_iim_lec = nalu_lect2m_rbd, n_iim_mat = nalu_mate2m_rbd,
+    y_iim_lec = prom_lect2m_rbd, y_iim_mat = prom_mate2m_rbd
+  )
+
+# Consolidado SIMCE
+sim_wide <- sim4 |>
+  inner_join(sim6,  by = "rbd") |>
+  inner_join(simii, by = "rbd") |>
+  filter(if_all(c(y_4b_lec,y_4b_mat,y_6b_lec,y_6b_mat,y_iim_lec,y_iim_mat),
+                ~ .x >= 150 & .x <= 350))
+
+# Docentes (input)
+doc_raw <- read_sheet(SS, sheet = "12", range = "A8:AU16696") |> clean_names()
+must_have(doc_raw, c("rbd","agno","estado_estab"))
+has_hh <- "hh_tot" %in% names(doc_raw)
+has_dc <- "dc_tot" %in% names(doc_raw)
+
+docentes <- doc_raw |>
+  transmute(
+    rbd = as.character(rbd),
+    agno = to_int(agno),
+    est  = to_int(estado_estab),
+    hh   = if (has_hh) to_num(hh_tot) else NA_real_,
+    dc   = if (has_dc) to_num(dc_tot) else NA_real_
+  ) |>
+  filter(agno == 2024, est == 1, (hh > 0 | dc > 0)) |>
+  mutate(x_hh_tot = dplyr::coalesce(hh, dc)) |>
+  select(rbd, x_hh_tot)
+
+# Panel final
+panel <- sim_wide |>
+  inner_join(docentes, by = "rbd") |>
+  filter(dep_cod %in% c(1,2,4)) |>
+  arrange(region, comuna, nom_rbd)
+
+# DEA (BCC, orientación output)
+X <- as.matrix(panel$x_hh_tot)
+outcols <- c("y_4b_lec","y_4b_mat","y_6b_lec","y_6b_mat","y_iim_lec","y_iim_mat")
+Y <- as.matrix(panel[, outcols, drop = FALSE])
+dea_all <- dea(X, Y, RTS = "vrs", ORIENTATION = "out")
+panel$score <- efficiencies(dea_all)
+
+# Resumen por dependencia
+panel |>
+  mutate(dep_lab = dplyr::recode(as.character(dep_cod),
+                                 `1`="Municipal", `2`="Part.Subv.", `4`="SLEP")) |>
+  group_by(dep_lab) |>
+  summarise(n=dplyr::n(), p25=quantile(score,.25), med=median(score), p75=quantile(score,.75),
+            .groups="drop") |>
+  arrange(desc(med)) |>
+  print()
+
+# Boxplot (φ adimensional)
+ggplot(panel |> mutate(dep_lab = dplyr::recode(as.character(dep_cod),
+                                               `1`="Municipal",`2`="Part.Subv.",`4`="SLEP")),
+       aes(x = dep_lab, y = score)) +
+  geom_boxplot(outlier.alpha = .25) +
+  geom_hline(yintercept = 1, linetype = 2, linewidth = .4) +
+  labs(x = "Dependencia (categorías)",
+       y = "φ — eficiencia DEA ",
+       title = NULL) +
+  theme_minimal(base_size = base_sz)
+
+# Histograma global de φ (conteos)
+N   <- nrow(panel)
+med <- median(panel$score, na.rm = TRUE)
+
+ggplot(panel, aes(x = score)) +
+  geom_histogram(binwidth = 0.02, fill = "#1f77b4", color = "black", boundary = 0) +
+  geom_vline(xintercept = med, linetype = 2) +
+  annotate("text", x = med, y = Inf, vjust = 1.5,
+           label = paste0("Mediana φ: ", round(med, 3))) +
+  annotate("text", x = min(panel$score, na.rm = TRUE), y = Inf, vjust = 1.5, hjust = 0,
+           label = paste0("N = ", N)) +
+  labs(x = "φ — eficiencia DEA ",
+       y = "Número de colegios",
+       title = NULL) +
+  theme_minimal(base_size = base_sz) +
+  theme(axis.title = element_text(face = "bold"))
+
+# Histograma por dependencia (facetas)
+panel_fac <- panel |>
+  mutate(dep_lab = dplyr::recode(as.character(dep_cod),
+                                 `1`="Municipal", `2`="Part.Subv.", `4`="SLEP"))
+med_dep <- panel_fac |>
+  group_by(dep_lab) |>
+  summarise(med = median(score, na.rm = TRUE), .groups = "drop")
+
+ggplot(panel_fac, aes(x = score)) +
+  geom_histogram(binwidth = 0.02, fill = "#4e79a7", color = "black", boundary = 0) +
+  facet_wrap(~ dep_lab, nrow = 1) +
+  geom_vline(data = med_dep, aes(xintercept = med), linetype = 2) +
+  labs(x = "φ — eficiencia DEA ",
+       y = "Número de colegios",
+       title = NULL) +
+  theme_minimal(base_size = base_sz) +
+  theme(axis.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"))
+
+# Histograma de eficiencia normalizada en %
+panel_eff <- panel |>
+  mutate(eff_pct = pmin(100, 100 / score))
+med_pct <- median(panel_eff$eff_pct, na.rm = TRUE)
+
+ggplot(panel_eff, aes(x = eff_pct)) +
+  geom_histogram(binwidth = 2, fill = "#59a14f", color = "black", boundary = 0) +
+  geom_vline(xintercept = med_pct, linetype = 2) +
+  annotate("text", x = med_pct, y = Inf, vjust = 1.5,
+           label = paste0("Mediana: ", round(med_pct, 1), "%")) +
+  labs(x = "Eficiencia normalizada (%)",
+       y = "Número de colegios",
+       title = NULL) +
+  scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, 10)) +
+  theme_minimal(base_size = base_sz) +
+  theme(axis.title = element_text(face = "bold"))
+
+# Peers
+head(peers(dea_all))
+
+# Targets (proyección a frontera)
+targ <- targets(dea_all)
+Yhat <- targ$yhat
+colnames(Yhat) <- paste0(outcols, "_target")
+head(round(Yhat, 1))
+
+# Ranking
+ranked <- panel |>
+  mutate(dep_lab = dplyr::recode(as.character(dep_cod),
+                                 `1`="Municipal",`2`="Part.Subv.",`4`="SLEP")) |>
+  select(rbd, nom_rbd, dep_lab, x_hh_tot, all_of(outcols), score) |>
+  arrange(score)
+head(ranked, 15); tail(ranked, 15)
+
+# Conteo por dependencia
+panel |>
+  mutate(dep_lab = dplyr::recode(as.character(dep_cod),
+                                 `1`="Municipal",`2`="Part.Subv.",`4`="SLEP")) |>
+  count(dep_lab) |>
+  arrange(desc(n)) |>
+  print()
+
+
+
+
+##########################################
+##########################################
+# Gratuidad
+##########################################
+##########################################
+
+
+
+# ==============================
+# 2 gráficos separados en 1 imagen (lado a lado, MISMA ESCALA Y)
+# Matriculados (apilado Univ/IP/CFT)  +  Beneficios (apilado Gratuidad/Becas)
+# Minimalista, sin títulos, leyenda abajo, eje Y "000.000"
+# ==============================
+
+# Instalar si faltan (no hace nada si ya los tienes)
+if (!requireNamespace("tidyverse", quietly = TRUE)) install.packages("tidyverse")
+if (!requireNamespace("scales", quietly = TRUE))    install.packages("scales")
+
+library(tidyverse)
+library(scales)
+
+# -------------------------
+# Datos (ajusta/actualiza si agregas años)
+# -------------------------
+df <- tribble(
+  ~year, ~uni,     ~ip,      ~cft,     ~gratuidad, ~becas,
+  2023,  693662,   419014,   136725,   511705,     114494,
+  2024,  706040,   426075,   145225,   569858,     106828,
+  2025,  731981,   442924,   152439,   612000,     105533
+)
+
+# ---- Panel A: Matriculados (Universidad/IP/CFT) ----
+matriculados_long <- df %>%
+  select(year,
+         Universidad = uni,
+         `Institutos Profesionales` = ip,
+         `Centros de Formación Técnica` = cft) %>%
+  pivot_longer(-year, names_to = "segment", values_to = "value") %>%
+  mutate(panel = "Matriculados")
+
+# ---- Panel B: Beneficios (Gratuidad + Becas) ----
+beneficios_long <- df %>%
+  select(year,
+         Gratuidad = gratuidad,
+         `Becas de arancel` = becas) %>%
+  pivot_longer(-year, names_to = "segment", values_to = "value") %>%
+  mutate(panel = "Beneficios")
+
+# Combinar para facetear
+plot_df <- bind_rows(matriculados_long, beneficios_long) %>%
+  mutate(year = factor(year))
+
+# Paleta discreta
+pal <- c(
+  "Universidad" = "#4E79A7",
+  "Institutos Profesionales" = "#F28E2B",
+  "Centros de Formación Técnica" = "#E15759",
+  "Gratuidad" = "#76B7B2",
+  "Becas de arancel" = "#59A14F"
+)
+
+# -------------------------
+# Gráfico final (dos paneles en una imagen, misma escala Y)
+# -------------------------
+ggplot(plot_df, aes(x = year, y = value, fill = segment)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~ panel, ncol = 2, scales = "fixed") +   # MISMA escala Y en ambos paneles
+  scale_fill_manual(values = pal) +
+  scale_y_continuous(
+    labels = label_number(big.mark = ".", decimal.mark = ",", accuracy = 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.box = "horizontal",
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(margin = margin(t = 5)),
+    axis.text.y = element_text(margin = margin(r = 5))
+  )
+
+
+
+
+
+
+##################################################
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+##################################################
+
+
+# Paquetes
+if (!requireNamespace("tidyverse", quietly = TRUE)) install.packages("tidyverse")
+if (!requireNamespace("scales",   quietly = TRUE)) install.packages("scales")
+library(tidyverse); library(scales)
+
+# --- MATRÍCULA (ejemplo; reemplaza por tu base real) ---
+matriculas <- tribble(
+  ~year, ~uni,    ~ip,     ~cft,
+  2019,  650000,  380000,  120000,
+  2020,  640000,  360000,  125000,
+  2021,  660000,  370000,  130000,
+  2022,  680000,  390000,  135000,
+  2023,  693662,  419014,  136725,
+  2024,  706040,  426075,  145225
+)
+
+# --- GASTO (CLP corrientes) ---
+gasto <- tribble(
+  ~anio, ~asig, ~clasificacion, ~ejecucion,
+  2024, 198, "Gratuidad - Universidades", 1333675404,
+  2024, 199, "Gratuidad - IP y CFT",       633074379,
+  2024, 200, "Becas Educación Superior",    198630056,
+  2023, 198, "Gratuidad - Universidades", 1127035163,
+  2023, 199, "Gratuidad - IP y CFT",       535447758,
+  2023, 200, "Becas Educación Superior",    196419193,
+  2022, 198, "Gratuidad - Universidades",   940293199,
+  2022, 199, "Gratuidad - IP y CFT",        439014060,
+  2022, 200, "Becas Educación Superior",    186136205,
+  2021, 198, "Gratuidad - Universidades",   813356303,
+  2021, 199, "Gratuidad - IP y CFT",        368815276,
+  2021, 200, "Becas Educación Superior",    201560333,
+  2020, 198, "Gratuidad - Universidades",   748507564,
+  2020, 199, "Gratuidad - IP y CFT",        342197375,
+  2020, 200, "Becas Educación Superior",    230085558,
+  2019, 198, "Gratuidad - Universidades",   314099994,
+  2019, 199, "Gratuidad - IP y CFT",        142172846,
+  2019, 200, "Becas Educación Superior",    140841649
+) %>% mutate(asig = factor(asig, levels = c(198,199,200)))
+
+# --- Series auxiliares ---
+gasto_tot <- gasto %>%
+  group_by(anio) %>% summarise(gasto_total = sum(ejecucion), .groups = "drop") %>%
+  mutate(gasto_gclp = gasto_total/1e9)  # G$ CLP (miles de millones)
+
+matri_tot <- matriculas %>%
+  transmute(anio = year, matricula_total = uni + ip + cft)
+
+base_costo <- inner_join(gasto_tot, matri_tot, by = "anio") %>%
+  mutate(costo_unit_kclp = (gasto_total / matricula_total) / 1e3)  # miles de CLP/est.
+
+# factor de escala para el eje secundario
+k <- max(gasto_tot$gasto_gclp, na.rm = TRUE) / max(base_costo$costo_unit_kclp, na.rm = TRUE)
+
+# --- Gráfico con ejes titulados + tipografías más grandes ---
+p <- ggplot() +
+  geom_line(data = gasto %>% mutate(ejec_gclp = ejecucion/1e9),
+            aes(anio, ejec_gclp, color = clasificacion), linewidth = 1.1) +
+  geom_point(data = gasto %>% mutate(ejec_gclp = ejecucion/1e9),
+             aes(anio, ejec_gclp, color = clasificacion), size = 2.6) +
+  geom_line(data = base_costo, aes(anio, costo_unit_kclp * k),
+            color = "black", linewidth = 1.1, linetype = "22") +
+  geom_point(data = base_costo, aes(anio, costo_unit_kclp * k),
+             color = "black", size = 2) +
+  scale_x_continuous(breaks = sort(unique(gasto$anio))) +
+  scale_y_continuous(
+    name = "Gasto (G$ CLP, miles de millones)",
+    labels = label_number(accuracy = 0.1, decimal.mark = ","),
+    sec.axis = sec_axis(~ . / k,
+                        name   = "Costo unitario (miles de CLP por estudiante)",
+                        labels = label_number(big.mark = ".", decimal.mark = ",", accuracy = 1))
+  ) +
+  scale_color_brewer(palette = "Dark2", name = NULL) +
+  labs(x = "Año", y = NULL) +
+  theme_minimal(base_size = 14) +  # base más grande
+  theme(
+    plot.title   = element_blank(),
+    legend.position = "bottom",
+    legend.text  = element_text(size = 13),
+    axis.title.x = element_text(size = 14, face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(size = 14, face = "bold", margin = margin(r = 8)),
+    axis.text.x  = element_text(size = 12, margin = margin(t = 6)),
+    axis.text.y  = element_text(size = 12, margin = margin(r = 6)),
+    axis.title.y.right = element_text(size = 14, face = "bold", margin = margin(l = 8)),
+    panel.grid.minor = element_blank()
+  )
+
+p
+# ggsave("evolucion_gasto_costo_unitario_unidades.png", p, width = 9, height = 5.2, dpi = 300)
+
+
+
+
+##################################################
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+# ------------------------------------------------
+##################################################
+
+
+
+
+
+
+
+
+
+

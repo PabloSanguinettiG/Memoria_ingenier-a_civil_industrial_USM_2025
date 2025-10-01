@@ -1,0 +1,159 @@
+# -------- Paquetes --------
+ipks <- c("googlesheets4","dplyr","tidyr","readr","Benchmarking",
+          "ggplot2","purrr","stringr","scales")
+new <- ipks[!(ipks %in% installed.packages()[, "Package"])]
+if (length(new)) install.packages(new, dependencies = TRUE)
+
+library(googlesheets4)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(Benchmarking)
+library(ggplot2)
+library(purrr)
+library(stringr)
+library(scales)
+
+# -------- 0) Leer Google Sheet --------
+gs4_deauth()  # hoja pública
+ss  <- "https://docs.google.com/spreadsheets/d/1VcQB-CXlvWvquiJL_brEnVBdf0gqLFzVVA88ktHu3HM"
+raw <- read_sheet(ss, sheet = "7A", range = "A9:Y2655")
+
+# -------- 1) Filtrar a granularidad base (nivel 3) --------
+base <- raw %>%
+  filter(`B_PAIS` == 0, `B_REGION` == 0)
+
+# -------- 2) Extraer variables por servicio (insumos y output) --------
+# INPUT 1: PROM_CAMAS (Promedio Cama Disponibles) -> ya viene anualizado en tu columna PROM_CAMAS
+inp_camas <- base %>%
+  filter(Glosa == "Promedio Cama Disponibles") %>%
+  transmute(
+    seremi_code  = as.character(`Cód. SS/SEREMI`),
+    estab_code   = as.character(`Cód. Estab.`),
+    estab_name   = as.character(`Nombre Establecimiento`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    service_name = as.character(`Nombre Nivel Cuidado`),
+    PROM_CAMAS   = suppressWarnings(as.numeric(PROM_CAMAS))
+  )
+
+# INPUT 2: Días de Estada (Acum)
+inp_dias <- base %>%
+  filter(Glosa == "Dias de Estada") %>%
+  transmute(
+    seremi_code  = as.character(`Cód. SS/SEREMI`),
+    estab_code   = as.character(`Cód. Estab.`),
+    estab_name   = as.character(`Nombre Establecimiento`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    DIAS_ESTADA  = suppressWarnings(as.numeric(Acum))
+  )
+
+# OUTPUT: Número de Egresos (Acum)
+out_egres <- base %>%
+  filter(Glosa == "Numero de Egresos") %>%
+  transmute(
+    seremi_code  = as.character(`Cód. SS/SEREMI`),
+    estab_code   = as.character(`Cód. Estab.`),
+    estab_name   = as.character(`Nombre Establecimiento`),
+    service_code = as.character(`Cód. Nivel Cuidado`),
+    EGRESOS      = suppressWarnings(as.numeric(Acum))
+  )
+
+# -------- 3) Panel a nivel 3 y luego agregación a nivel establecimiento (A2) --------
+A_base <- inp_camas %>%
+  inner_join(inp_dias , by = c("seremi_code","estab_code","estab_name","service_code")) %>%
+  inner_join(out_egres, by = c("seremi_code","estab_code","estab_name","service_code")) %>%
+  # opcional: eliminar filas "Datos ..." o servicios código 0
+  filter(service_code != "0",
+         !str_detect(service_name, regex("^Datos\\s", ignore_case = TRUE))) %>%
+  transmute(
+    seremi_code, estab_code, estab_name, service_code, service_name,
+    x_camas_serv = PROM_CAMAS,
+    x_dias_serv  = DIAS_ESTADA,
+    y_egres_serv = EGRESOS
+  )
+
+# ---- Agregación MODELO A2 (nivel establecimiento) ----
+# Regla:
+#  - x_dias  -> SUMA por establecimiento
+#  - y_egres -> SUMA por establecimiento
+#  - x_camas -> SUMA de PROM_CAMAS de sus servicios (capacidad promedio diaria total)
+A2 <- A_base %>%
+  group_by(seremi_code, estab_code, estab_name) %>%
+  summarise(
+    x_camas = sum(x_camas_serv, na.rm = TRUE),
+    x_dias  = sum(x_dias_serv , na.rm = TRUE),
+    y_egres = sum(y_egres_serv, na.rm = TRUE),
+    n_serv  = n_distinct(service_code),
+    .groups = "drop"
+  ) %>%
+  # calidad mínima para DEA
+  filter(is.finite(x_camas), is.finite(x_dias), is.finite(y_egres),
+         x_camas > 0, x_dias > 0, y_egres > 0)
+
+# -------- 4) DEA BCC (VRS) orientado a output a nivel establecimiento --------
+X <- as.matrix(A2[, c("x_camas","x_dias")])
+Y <- as.matrix(A2[, "y_egres"])
+
+dea_res <- dea(X, Y, RTS = "vrs", ORIENTATION = "out")
+
+# Eficiencia estandarizada en [0,100] para reporte
+eff_raw <- as.numeric(dea_res$eff)
+A2 <- A2 %>%
+  mutate(efficiency = ifelse(eff_raw <= 1 + 1e-9, pmin(100, eff_raw * 100),
+                             pmin(100, 100 / eff_raw)),
+         los_prom   = x_dias / y_egres)   # días de estancia promedio por egreso
+
+# -------- 5) Único gráfico (histograma de eficiencias) --------
+med <- median(A2$efficiency, na.rm = TRUE)
+
+g_hist <- ggplot(A2, aes(x = efficiency)) +
+  geom_histogram(binwidth = 5, fill = "#1f77b4", color = "black", boundary = 0) +
+  geom_vline(xintercept = med, linetype = 2) +
+  annotate("text", x = med, y = 12, vjust = -0.3,    # coloca el texto dentro del rango 1..12
+           label = paste0("Mediana: ", round(med,1), "%")) +
+  labs(title = "Modelo A2 — Eficiencia BCC (VRS) a nivel establecimiento",
+       x = "% Eficiencia",
+       y = "# Establecimientos") +
+  scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, by = 10)) +
+  scale_y_continuous(breaks = 1:12, limits = c(0, 12)) +  # <<< aquí forzamos 1..12
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title  = element_text(face = "bold"))
+
+print(g_hist)
+
+
+# -------- 6) Tabla: Top-5 y Bottom-5 --------
+top5 <- A2 %>%
+  arrange(desc(efficiency)) %>%
+  slice_head(n = 5) %>%
+  transmute(
+    tipo          = "Top 5 eficientes",
+    seremi_code,
+    estab_code,
+    estab_name,
+    eficiencia_pct = round(efficiency, 1),
+    n_serv,
+    los_prom       = round(los_prom, 2)
+  )
+
+bottom5 <- A2 %>%
+  arrange(efficiency, estab_code) %>%
+  slice_head(n = 5) %>%
+  transmute(
+    tipo          = "Bottom 5 (menos eficientes)",
+    seremi_code,
+    estab_code,
+    estab_name,
+    eficiencia_pct = round(efficiency, 1),
+    n_serv,
+    los_prom       = round(los_prom, 2)
+  )
+
+tabla_top_bottom <- bind_rows(top5, bottom5)
+
+print(tabla_top_bottom, n = nrow(tabla_top_bottom))
+
+# (Opcional) Guardar
+# ggsave("A2_hist_eficiencia_establecimiento.png", g_hist, width = 8, height = 6, dpi = 150)
+# write_csv(tabla_top_bottom, "A2_top5_bottom5.csv")
